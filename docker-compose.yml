@@ -1,0 +1,93 @@
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n
+    container_name: n8n_home
+    ports:
+      - "5678:5678"
+    environment:
+      GENERIC_TIMEZONE: "Asia/Hong_Kong"
+      TZ: "Asia/Hong_Kong"
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      # Tell n8n to use external runners
+      N8N_RUNNERS_ENABLED: "true"
+      N8N_RUNNERS_MODE: "external"
+      N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN}
+      # Broker settings (listening for the runner)
+      N8N_RUNNERS_BROKER_LISTEN_ADDRESS: "0.0.0.0"
+      N8N_RUNNERS_BROKER_PORT: "5679"
+      N8N_RUNNERS_STDLIB_ALLOW: "*"
+      N8N_RUNNERS_EXTERNAL_ALLOW: "*"
+    volumes:
+      - n8n_data:/home/node/.n8n
+  
+  fastapi-app:
+    build: ./fastapi-backend
+    container_name: parking_fastapi
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/parking_db
+      # - N8N_WEBHOOK_URL=http://n8n-service:5678/webhook
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: parking_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: parking_db
+      RULESET_VERSION: ${RULESET_VERSION}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+  
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    depends_on:
+      - n8n
+      
+  runners:
+    build:
+      context: ./runners # This builds our custom Dockerfile
+    container_name: n8n-runners
+    environment:
+      # Connect back to n8n
+      N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN}
+      N8N_RUNNERS_TASK_BROKER_URI: "http://n8n:5679"
+      N8N_RUNNERS_STDLIB_ALLOW: "*"
+      N8N_RUNNERS_EXTERNAL_ALLOW: "*"
+    volumes:
+      # Mount the config so the runner knows what to do
+      - ./config/n8n-task-runners.json:/etc/n8n-task-runners.json
+    depends_on:
+      - n8n
+
+volumes:
+  n8n_data:
+  db_data:
+
+
+
+# version: '3.8'
+
+# services:
+#   n8n:
+#     build: .
+#     restart: always
+#     ports:
+#       - "5678:5678"
+#     environment:
+#       - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+#     user: "1000:1000" # Forces the container to run as a consistent user, avoiding root/node permission conflicts
+#     volumes:
+#       - n8n_data:/home/node/.n8n
+
+# volumes:
+#   n8n_data:
