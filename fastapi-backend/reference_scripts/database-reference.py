@@ -375,11 +375,10 @@ CREATE TABLE parking_transactions (
     start_time TEXT NOT NULL,           -- RESERVATION DATE (DATE AND TIME)
     end_time TEXT NOT NULL,             -- RESERVATION DATE (DATE AND TIME)                
     ref_transaction_id INTEGER,
-    reason TEXT,
+    purpose TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
     spot_id TEXT NOT NULL,              -- The actual assigned spot (e.g., 'A-2') -- confirmation only if a spot was assigned
-    priority INTEGER DEFAULT 1,         -- 1 = Staff, 2 = VIP -- removed since priority is computed on the fly
-
+    priority INTEGER DEFAULT 2,         -- 1 = Low, 2 = Normal, 3 = High
 );
 
 Reservation Date

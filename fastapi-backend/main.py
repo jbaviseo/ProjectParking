@@ -1,14 +1,57 @@
-from fastapi import FastAPI, HTTPException, Query
 from contextlib import asynccontextmanager
+from datetime import date, time, timedelta
+from typing import Literal, Optional
+
+from fastapi import FastAPI, HTTPException, Query
+from pydantic import BaseModel, Field
+
+import database
+
+
+class ReserveRequest(BaseModel):
+    user_id: str = Field(min_length=1)
+    vehicle_type: Literal["Motorcycle", "Car"]
+    reservation_date: date
+    reservation_starttime: time = time(13, 0)
+    hours: int = Field(default=9, ge=1, le=24)
+    purpose: Optional[str] = None
+    preferred_spot_id: Optional[str] = None
+    priority: int = Field(default=2, ge=1, le=3)
+
+
+class ConfirmRequest(BaseModel):
+    user_id: str = Field(min_length=1)
+    ref_transaction_id: Optional[int] = Field(default=None, gt=0)
+
+
+class ReleaseRequest(BaseModel):
+    user_id: str = Field(min_length=1)
+    ref_transaction_id: int = Field(gt=0)
+    reason: Optional[str] = None
+
+
+def _transaction_response(result: dict) -> dict:
+    if result.get("success"):
+        return result
+
+    error = result.get("error", "The transaction could not be completed.")
+    if result.get("error_code") == "database_error":
+        raise HTTPException(status_code=500, detail="Database transaction failed.")
+    if "not found" in error.lower():
+        raise HTTPException(status_code=404, detail=error)
+    if "cannot modify" in error.lower():
+        raise HTTPException(status_code=403, detail=error)
+    if any(term in error.lower() for term in ("no spots", "maximum", "already", "no upcoming", "no longer actionable")):
+        raise HTTPException(status_code=409, detail=error)
+    raise HTTPException(status_code=422, detail=error)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # on startup
-    # initialize database connections pool(?)
-    
-    yield
-
-    # on shutdown
+    database.init_db()
+    try:
+        yield
+    finally:
+        database.close_pool()
 
 
 app = FastAPI(
@@ -36,68 +79,57 @@ def get_parking_state(date: str):
     return {"Spot 1" : ["001"]}
 
 @app.get("/reservations")
-def get_full_parking_state():
-    '''Used to show all the reservations for the current week and the next'''
-    pass
+def get_full_parking_state(
+    start_date: Optional[date] = Query(default=None),
+    end_date: Optional[date] = Query(default=None),
+):
+    """List active reservations overlapping a requested window."""
+    today = date.today()
+    default_start = today - timedelta(days=today.weekday())
+    window_start = start_date or default_start
+    window_end = end_date or window_start + timedelta(days=14)
+    if window_end <= window_start:
+        raise HTTPException(status_code=422, detail="end_date must be after start_date.")
+    try:
+        return database.get_reservations(window_start.isoformat(), window_end.isoformat())
+    except Exception as error:
+        raise HTTPException(status_code=500, detail="Could not load reservations.") from error
 
 @app.post("/reserve")
-def reserve_parking():
-    # PAYLOAD: user_id: str - email and maybe password run through hash function
-    #          reservation_date: str - date when the reservation starts
-    #          reservation_starttime: str - time when the reservation starts within the date, defaults to 1 PM
-    #          hours: str - hours of stay, defaults to 9
-    #          purpose: str - text that notes purpose of visit
-
-    # OUTPUT: JSON[
-    #    reservation_id: str - reservation id for release command
-    #    reservation_date: str - date when the reservation starts
-    #    reservation_starttime: str - time when the reservation starts within the date, defaults to 1 PM
-    #    hours: int - hours of stay, defaults to 9
-    #    purpose: str - text that notes purpose of visit
-    #    spot_allocation: str/None - parking spot allocated if any, waitlisted if None
-    # ]
-
-    # Creates a RESERVE record, checks for available parking spots and puts it in spot_allocation
-    # CHECKS:
-    # Does user already have more than 2 parking reservations?
-    # Is the reserve date within next week or this week?
-    # Is there an available parking spot to allocate to this reservation?
-    return None
+def reserve_parking(payload: ReserveRequest):
+    """Create a RESERVE transaction and assign an available parking spot."""
+    result = database.insert_transaction(
+        action="RESERVE",
+        user_id=payload.user_id,
+        vehicle_type=payload.vehicle_type,
+        reservation_date=payload.reservation_date.isoformat(),
+        reservation_starttime=payload.reservation_starttime.strftime("%H:%M"),
+        hours=payload.hours,
+        purpose=payload.purpose,
+        preferred_spot_id=payload.preferred_spot_id,
+        priority=payload.priority,
+    )
+    result = _transaction_response(result)
+    result.update({"user_id": payload.user_id, "vehicle_type": payload.vehicle_type})
+    return result
 
 @app.post("/confirm")
-def confirm_parking():
-    # PAYLOAD: user_id: str - email and maybe password run through hash function
-
-    # OUTPUT: JSON[
-    #    reservation_id: str - reservation id that was confirmed
-    #    reservation_date: str - date when the reservation starts
-    #    reservation_starttime: str - time when the reservation starts within the date, defaults to 1 PM
-    #    hours: int - hours of stay, defaults to 9
-    #    purpose: str - text that notes purpose of visit
-    #    spot_allocation: str/None - parking spot allocated if any, waitlisted if None
-    # ]
-
-    # Creates a CONFIRM transaction for the reservation_id with closest upcoming
-    # reservation_date+reservation_starttime as long as it is x hours from the start
-
-    return None
+def confirm_parking(payload: ConfirmRequest):
+    """Confirm a referenced reservation or the user's next upcoming reservation."""
+    result = database.insert_transaction(
+        action="CONFIRM",
+        user_id=payload.user_id,
+        ref_transaction_id=payload.ref_transaction_id,
+    )
+    return _transaction_response(result)
 
 @app.post("/release")
-def release_parking():
-    '''Creates a RELEASE transaction matching a RESERVE, cancelling it or ending it early if underway.'''
-
-    # PAYLOAD: user_id: str - user who owns the reservation
-    #          ref_transaction_id: int - ID of the RESERVE transaction to release
-    #          reason: str/None - optional explanation for the cancellation or early termination
-
-    # OUTPUT: JSON[
-    #    success: bool - whether the RELEASE transaction was created
-    #    action: str - "RELEASE"
-    #    transaction_id: int - ID of the created RELEASE transaction
-    #    ref_transaction_id: int - ID of the RESERVE transaction being released
-    #    spot_id: str/None - parking spot associated with the reservation
-    #    user_id: str - user who owns the reservation
-    #    error: str/None - failure reason when success is false
-    # ]
-
-    return None
+def release_parking(payload: ReleaseRequest):
+    """Create a RELEASE transaction for a reservation, ending its spot claim."""
+    result = database.insert_transaction(
+        action="RELEASE",
+        user_id=payload.user_id,
+        ref_transaction_id=payload.ref_transaction_id,
+        reason=payload.reason,
+    )
+    return _transaction_response(result)
