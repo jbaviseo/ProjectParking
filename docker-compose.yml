@@ -73,21 +73,3 @@ volumes:
   n8n_data:
   db_data:
 
-
-
-# version: '3.8'
-
-# services:
-#   n8n:
-#     build: .
-#     restart: always
-#     ports:
-#       - "5678:5678"
-#     environment:
-#       - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
-#     user: "1000:1000" # Forces the container to run as a consistent user, avoiding root/node permission conflicts
-#     volumes:
-#       - n8n_data:/home/node/.n8n
-
-# volumes:
-#   n8n_data:
