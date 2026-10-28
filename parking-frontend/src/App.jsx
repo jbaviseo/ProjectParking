@@ -29,41 +29,9 @@ import {
 } from "lucide-react";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api";
-const SAMPLE_RESERVATIONS = [
-  { day: 0, time: "08:30", hours: 2, name: "Alex Rivera", email: "alex.rivera@company.com", spot: "A-1", vehicle: "Car", purpose: "Client meeting", color: "mint" },
-  { day: 0, time: "10:00", hours: 4, name: "Priya Shah", email: "priya.shah@company.com", spot: "B-2", vehicle: "Car", purpose: "Workshop", color: "coral" },
-  { day: 1, time: "09:00", hours: 3, name: "Noah Chen", email: "noah.chen@company.com", spot: "A-2", vehicle: "Motorcycle", purpose: "Team planning", color: "blue" },
-  { day: 1, time: "13:30", hours: 2, name: "Maya Brooks", email: "maya.brooks@company.com", spot: "B-1", vehicle: "Car", purpose: "Site visit", color: "yellow" },
-  { day: 2, time: "08:00", hours: 6, name: "Ethan Park", email: "ethan.park@company.com", spot: "A-1", vehicle: "Car", purpose: "Operations", color: "blue" },
-  { day: 2, time: "11:30", hours: 2, name: "Zoe Patel", email: "zoe.patel@company.com", spot: "B-3", vehicle: "Motorcycle", purpose: "Design review", color: "mint" },
-  { day: 3, time: "09:30", hours: 3, name: "Sam Okafor", email: "sam.okafor@company.com", spot: "A-2", vehicle: "Car", purpose: "Partner meeting", color: "coral" },
-  { day: 4, time: "08:30", hours: 4, name: "Lena Fischer", email: "lena.fischer@company.com", spot: "B-1", vehicle: "Car", purpose: "Quarterly review", color: "yellow" },
-  { day: 4, time: "14:00", hours: 2, name: "Omar Ali", email: "omar.ali@company.com", spot: "B-3", vehicle: "Motorcycle", purpose: "Office visit", color: "mint" },
-];
 
 function atTime(date, time = "13:00") {
   return parseISO(`${format(date, "yyyy-MM-dd")}T${time}`);
-}
-
-function createDemoReservations(weekStart) {
-  return SAMPLE_RESERVATIONS.map((reservation, index) => {
-    const date = addDays(weekStart, reservation.day);
-    const start = atTime(date, reservation.time);
-    return {
-      id: `demo-${format(date, "yyyyMMdd")}-${index}`,
-      date,
-      start,
-      end: addHours(start, reservation.hours),
-      hours: reservation.hours,
-      user: reservation.name,
-      userId: reservation.email,
-      spot: reservation.spot,
-      vehicle: reservation.vehicle,
-      purpose: reservation.purpose,
-      color: reservation.color,
-      demo: true,
-    };
-  });
 }
 
 function parseServerDate(value, time) {
@@ -111,7 +79,6 @@ function normalizeReservations(payload) {
         purpose: row.purpose ?? "Reservation",
         confirmed: Boolean(row.confirmed ?? row.is_confirmed),
         color: ["mint", "coral", "blue", "yellow"][index % 4],
-        demo: false,
       };
     })
     .filter(Boolean);
@@ -129,7 +96,6 @@ function initials(name) {
 function App() {
   const [weekStart, setWeekStart] = useState(() => startOfWeek(new Date(), { weekStartsOn: 1 }));
   const [reservations, setReservations] = useState([]);
-  const [isDemo, setIsDemo] = useState(true);
   const [isLoading, setIsLoading] = useState(true);
   const [apiNote, setApiNote] = useState("");
   const [formOpen, setFormOpen] = useState(false);
@@ -179,10 +145,8 @@ function App() {
       if (rows === null) throw new Error("The reservations endpoint has not returned a reservation list yet.");
       const parsed = normalizeReservations(rows);
       setReservations(parsed);
-      setIsDemo(false);
     } catch (error) {
-      setReservations(createDemoReservations(weekStart));
-      setIsDemo(true);
+      setReservations([]);
       setApiNote(error.message);
     } finally {
       setIsLoading(false);
@@ -239,10 +203,8 @@ function App() {
         vehicle: form.vehicle_type,
         purpose: form.purpose || "Reservation",
         color: "mint",
-        demo: false,
       };
-      setReservations((current) => [...current.filter((item) => !item.demo), added]);
-      setIsDemo(false);
+      setReservations((current) => [...current, added]);
       setSubmitSuccess(`Reservation ${result.reservation_id ?? result.transaction_id ?? "created"} was added.`);
       setForm((current) => ({ ...current, purpose: "" }));
     } catch (error) {
@@ -355,13 +317,7 @@ function App() {
               </div>
             </div>
 
-            {isDemo && (
-              <div className="demo-notice" role="status">
-                <span className="demo-pulse" />
-                <span><strong>Sample schedule</strong> · API reservations are not available yet.</span>
-                {apiNote && <span className="demo-detail">{apiNote}</span>}
-              </div>
-            )}
+            {apiNote && <div className="api-notice" role="alert"><CircleAlert size={15} /><span><strong>Could not load reservations.</strong> {apiNote}</span><button type="button" onClick={loadReservations}>Retry</button></div>}
             {actionNotice && <div className={`action-notice action-notice-${actionNotice.kind}`} role={actionNotice.kind === "error" ? "alert" : "status"}>{actionNotice.text}</div>}
 
             <div className="calendar-scroll">
@@ -389,10 +345,10 @@ function App() {
                             </div>
                             <div className="booking-meta"><span className="spot-label"><MapPin size={12} />{reservation.spot}</span><span className="vehicle-label"><CarFront size={13} />{reservation.vehicle}</span></div>
                             <div className="booking-purpose">{reservation.purpose}</div>
-                            {!reservation.demo && <div className="booking-actions">
+                            <div className="booking-actions">
                               {reservation.confirmed ? <span className="confirmed-state"><CircleCheck size={12} />Confirmed</span> : <button type="button" className="booking-action-confirm" onClick={() => runLifecycleAction("confirm", reservation)} disabled={pendingAction !== null} aria-label={`Confirm reservation for ${reservation.user}`} title="Confirm reservation">{pendingAction === `${reservation.id}:confirm` ? <LoaderCircle size={12} className="spin" /> : <CircleCheck size={12} />}<span>Confirm</span></button>}
                               <button type="button" className="booking-action-release" onClick={() => runLifecycleAction("release", reservation)} disabled={pendingAction !== null} aria-label={`Release reservation for ${reservation.user}`} title="Release reservation">{pendingAction === `${reservation.id}:release` ? <LoaderCircle size={12} className="spin" /> : <LogOut size={12} />}<span>Release</span></button>
-                            </div>}
+                            </div>
                           </article>
                         )) : (
                           <div className="empty-day"><span className="empty-day-line" /><span>Open day</span><button type="button" onClick={() => { setForm((current) => ({ ...current, reservation_date: format(day, "yyyy-MM-dd") })); openForm(); }} aria-label={`Create reservation for ${format(day, "EEEE, MMMM d")}`}><Plus size={15} /></button></div>

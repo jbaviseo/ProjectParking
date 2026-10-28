@@ -1,16 +1,40 @@
 import datetime
 import os
+from pathlib import Path
 from typing import Any, Optional
 
 import psycopg2
 from psycopg2 import pool
+from psycopg2.extensions import make_dsn
 from psycopg2.extras import RealDictCursor
+from dotenv import load_dotenv
 
 
-DATABASE_URL = os.getenv(
-	"DATABASE_URL",
-	"postgresql://user:password@localhost:5432/parking_db",
-)
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+
+
+def _database_dsn() -> str:
+	database_url = os.getenv("DATABASE_URL")
+	database_name = os.getenv("POSTGRES_DB", "parking_db")
+	if database_url:
+		return make_dsn(database_url, dbname=database_name)
+
+	user = os.getenv("POSTGRES_USER")
+	password = os.getenv("POSTGRES_PASSWORD")
+	if not user or not password:
+		raise RuntimeError(
+			"Set DATABASE_URL or both POSTGRES_USER and POSTGRES_PASSWORD in the environment."
+		)
+	return make_dsn(
+		user=user,
+		password=password,
+		dbname=database_name,
+		host=os.getenv("POSTGRES_HOST", "localhost"),
+		port=os.getenv("POSTGRES_PORT", "5432"),
+	)
+
+
+DATABASE_URL = _database_dsn()
 PARKING_SPOT_IDS = tuple(
 	spot_id.strip()
 	for spot_id in os.getenv("PARKING_SPOT_IDS", "A-1,A-2,B-1,B-2,B-3").split(",")
@@ -237,15 +261,24 @@ def insert_transaction(
 				cursor.execute("""
 					SELECT COUNT(*) AS active_reservations
 					FROM parking_transactions AS reservation
+					LEFT JOIN LATERAL (
+						SELECT lifecycle.created_at
+						FROM parking_transactions AS lifecycle
+						WHERE lifecycle.ref_transaction_id = reservation.id
+						  AND lifecycle.action IN ('RELEASE', 'BUMP')
+						ORDER BY lifecycle.id
+						LIMIT 1
+					) AS termination ON TRUE
 					WHERE reservation.action = 'RESERVE'
 					  AND reservation.user_id = %s
-					  AND reservation.end_time::timestamp > CURRENT_TIMESTAMP
-					  AND NOT EXISTS (
-						  SELECT 1
-						  FROM parking_transactions AS lifecycle
-						  WHERE lifecycle.ref_transaction_id = reservation.id
-							AND lifecycle.action IN ('RELEASE', 'BUMP')
-					  );
+					  AND COALESCE(
+						  LEAST(termination.created_at, reservation.end_time::timestamp),
+						  reservation.end_time::timestamp
+					  ) > CURRENT_TIMESTAMP
+					  AND COALESCE(
+						  LEAST(termination.created_at, reservation.end_time::timestamp),
+						  reservation.end_time::timestamp
+					  ) > reservation.start_time::timestamp;
 				""", (user_id,))
 				reservation_count = cursor.fetchone()
 				if reservation_count is None:
