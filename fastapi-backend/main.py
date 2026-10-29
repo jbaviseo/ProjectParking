@@ -21,7 +21,7 @@ class ReserveRequest(BaseModel):
 
 class ConfirmRequest(BaseModel):
     user_id: str = Field(min_length=1)
-    ref_transaction_id: Optional[int] = Field(default=None, gt=0)
+    ref_transaction_id: int = Field(gt=0)
 
 
 class ReleaseRequest(BaseModel):
@@ -41,7 +41,14 @@ def _transaction_response(result: dict) -> dict:
         raise HTTPException(status_code=404, detail=error)
     if "cannot modify" in error.lower():
         raise HTTPException(status_code=403, detail=error)
-    if any(term in error.lower() for term in ("no spots", "maximum", "already", "no upcoming", "no longer actionable")):
+    if any(term in error.lower() for term in (
+        "no spots",
+        "maximum",
+        "already",
+        "no upcoming",
+        "no longer actionable",
+        "only allocated",
+    )):
         raise HTTPException(status_code=409, detail=error)
     raise HTTPException(status_code=422, detail=error)
 
@@ -83,7 +90,7 @@ def get_full_parking_state(
     start_date: Optional[date] = Query(default=None),
     end_date: Optional[date] = Query(default=None),
 ):
-    """List active reservations overlapping a requested window."""
+    """Replay transactions and list computed reservation states in a requested window."""
     today = date.today()
     default_start = today - timedelta(days=today.weekday())
     window_start = start_date or default_start
@@ -97,7 +104,7 @@ def get_full_parking_state(
 
 @app.post("/reserve")
 def reserve_parking(payload: ReserveRequest):
-    """Create a RESERVE transaction and assign an available parking spot."""
+    """Create a RESERVE transaction, even when it must remain waitlisted."""
     result = database.insert_transaction(
         action="RESERVE",
         user_id=payload.user_id,
@@ -115,7 +122,7 @@ def reserve_parking(payload: ReserveRequest):
 
 @app.post("/confirm")
 def confirm_parking(payload: ConfirmRequest):
-    """Confirm a referenced reservation or the user's next upcoming reservation."""
+    """Record a driver's arrival for an allocated reservation."""
     result = database.insert_transaction(
         action="CONFIRM",
         user_id=payload.user_id,

@@ -2,6 +2,7 @@ import datetime
 import os
 from pathlib import Path
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 import psycopg2
 from psycopg2 import pool
@@ -73,9 +74,13 @@ def init_db() -> None:
 					ref_transaction_id INTEGER,
 					purpose TEXT,
 					created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-					spot_id TEXT NOT NULL,
+					spot_id TEXT,
 					priority INTEGER NOT NULL DEFAULT 2
 				);
+			""")
+			cursor.execute("""
+				ALTER TABLE parking_transactions
+				ALTER COLUMN spot_id DROP NOT NULL;
 			""")
 			cursor.execute("""
 				CREATE INDEX IF NOT EXISTS idx_parking_transactions_window
@@ -101,45 +106,104 @@ def close_pool() -> None:
 		db_pool = None
 
 
+def _simulate_reservations(
+	reservations: list[dict[str, Any]],
+	events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+	"""Replay reservation and lifecycle transactions to derive current statuses."""
+	events_by_reservation: dict[int, list[dict[str, Any]]] = {}
+	for event in events:
+		events_by_reservation.setdefault(event["ref_transaction_id"], []).append(event)
+
+	claims: list[dict[str, Any]] = []
+	results = []
+	ordered_reservations = sorted(reservations, key=lambda row: row["id"])
+
+	for reservation in ordered_reservations:
+		start = _parse_datetime(reservation["start_time"])
+		end = _parse_datetime(reservation["end_time"])
+		reservation_events = events_by_reservation.get(reservation["id"], [])
+		terminations = [
+			event for event in reservation_events
+			if event["action"] in {"RELEASE", "BUMP"}
+		]
+		termination = min(
+			(_parse_lifecycle_datetime(event["created_at"]) for event in terminations),
+			default=end,
+		)
+		effective_end = min(end, termination)
+		is_released = bool(terminations)
+		assigned_spot = None
+
+		if not is_released and effective_end > start:
+			preferred_spot = reservation["preferred_spot_id"]
+			candidates = list(PARKING_SPOT_IDS)
+			if preferred_spot in candidates:
+				candidates.remove(preferred_spot)
+				candidates.insert(0, preferred_spot)
+
+			assigned_spot = next(
+				(
+					spot_id for spot_id in candidates
+					if not any(
+						claim["spot_id"] == spot_id
+						and start < claim["end"]
+						and effective_end > claim["start"]
+						for claim in claims
+					)
+				),
+				None,
+			)
+			if assigned_spot:
+				claims.append({"spot_id": assigned_spot, "start": start, "end": effective_end})
+
+		if is_released:
+			status = "RELEASED"
+		elif assigned_spot is None:
+			status = "WAITLISTED"
+		elif any(event["action"] == "CONFIRM" for event in reservation_events):
+			status = "CONFIRMED"
+		else:
+			status = "ALLOCATED"
+
+		result = dict(reservation)
+		result["spot_id"] = assigned_spot
+		result["effective_end_time"] = effective_end.isoformat(sep=" ")
+		result["status"] = status
+		results.append(result)
+
+	return results
+
+
+def _get_reservations_for_window(cursor: Any, start_time: str, end_time: str) -> list[dict[str, Any]]:
+	cursor.execute("""
+		SELECT * FROM parking_transactions
+		WHERE action = 'RESERVE'
+		  AND start_time::timestamp < %s::timestamp
+		  AND end_time::timestamp > %s::timestamp
+		ORDER BY start_time::timestamp, id;
+	""", (end_time, start_time))
+	reservations = [dict(row) for row in cursor.fetchall()]
+	if not reservations:
+		return []
+
+	reservation_ids = [reservation["id"] for reservation in reservations]
+	cursor.execute("""
+		SELECT * FROM parking_transactions
+		WHERE ref_transaction_id = ANY(%s)
+		  AND action IN ('CONFIRM', 'RELEASE', 'BUMP')
+		ORDER BY id;
+	""", (reservation_ids,))
+	events = [dict(row) for row in cursor.fetchall()]
+	return _simulate_reservations(reservations, events)
+
+
 def get_reservations(start_time: str, end_time: str) -> list[dict[str, Any]]:
-	"""Return active RESERVE rows overlapping the requested time window."""
+	"""Return replayed reservation states overlapping the requested time window."""
 	connection = get_pool().getconn()
 	try:
 		with connection.cursor(cursor_factory=RealDictCursor) as cursor:
-			cursor.execute("""
-				SELECT reservation.*,
-				       COALESCE(
-					       LEAST(termination.created_at, reservation.end_time::timestamp),
-					       reservation.end_time::timestamp
-				       )::text AS effective_end_time,
-				       EXISTS (
-					       SELECT 1
-					       FROM parking_transactions AS confirmation
-					       WHERE confirmation.ref_transaction_id = reservation.id
-					         AND confirmation.action = 'CONFIRM'
-				       ) AS confirmed
-				FROM parking_transactions AS reservation
-				LEFT JOIN LATERAL (
-					SELECT lifecycle.created_at
-					FROM parking_transactions AS lifecycle
-					WHERE lifecycle.ref_transaction_id = reservation.id
-					  AND lifecycle.action IN ('RELEASE', 'BUMP')
-					ORDER BY lifecycle.id
-					LIMIT 1
-				) AS termination ON TRUE
-				WHERE reservation.action = 'RESERVE'
-				  AND reservation.start_time::timestamp < %s::timestamp
-				  AND COALESCE(
-					      LEAST(termination.created_at, reservation.end_time::timestamp),
-					      reservation.end_time::timestamp
-				  ) > %s::timestamp
-				  AND COALESCE(
-					      LEAST(termination.created_at, reservation.end_time::timestamp),
-					      reservation.end_time::timestamp
-				  ) > reservation.start_time::timestamp
-				ORDER BY reservation.start_time::timestamp, reservation.id;
-			""", (end_time, start_time))
-			return [dict(row) for row in cursor.fetchall()]
+			return _get_reservations_for_window(cursor, start_time, end_time)
 	except Exception:
 		connection.rollback()
 		raise
@@ -165,6 +229,14 @@ def _parse_datetime(value: Any) -> datetime.datetime:
 	if isinstance(value, datetime.date):
 		return datetime.datetime.combine(value, datetime.time.min)
 	return datetime.datetime.fromisoformat(str(value))
+
+
+def _parse_lifecycle_datetime(value: Any) -> datetime.datetime:
+	"""Convert ledger timestamps (stored in UTC) to the reservation's HKT timezone."""
+	timestamp = _parse_datetime(value)
+	if timestamp.tzinfo is None:
+		timestamp = timestamp.replace(tzinfo=datetime.timezone.utc)
+	return timestamp.astimezone(ZoneInfo("Asia/Hong_Kong")).replace(tzinfo=None)
 
 
 def _build_reservation_window(
@@ -232,8 +304,6 @@ def insert_transaction(
 	if action == "RESERVE":
 		if not vehicle_type:
 			return {"success": False, "error": "vehicle_type is required for a reservation."}
-		if not PARKING_SPOT_IDS:
-			return {"success": False, "error": "No parking spots are configured."}
 		try:
 			start_value, end_value, duration_hours = _build_reservation_window(
 				reservation_date,
@@ -259,78 +329,10 @@ def insert_transaction(
 
 			if action == "RESERVE":
 				cursor.execute("""
-					SELECT COUNT(*) AS active_reservations
-					FROM parking_transactions AS reservation
-					LEFT JOIN LATERAL (
-						SELECT lifecycle.created_at
-						FROM parking_transactions AS lifecycle
-						WHERE lifecycle.ref_transaction_id = reservation.id
-						  AND lifecycle.action IN ('RELEASE', 'BUMP')
-						ORDER BY lifecycle.id
-						LIMIT 1
-					) AS termination ON TRUE
-					WHERE reservation.action = 'RESERVE'
-					  AND reservation.user_id = %s
-					  AND COALESCE(
-						  LEAST(termination.created_at, reservation.end_time::timestamp),
-						  reservation.end_time::timestamp
-					  ) > CURRENT_TIMESTAMP
-					  AND COALESCE(
-						  LEAST(termination.created_at, reservation.end_time::timestamp),
-						  reservation.end_time::timestamp
-					  ) > reservation.start_time::timestamp;
-				""", (user_id,))
-				reservation_count = cursor.fetchone()
-				if reservation_count is None:
-					raise RuntimeError("The active reservation count query returned no result.")
-				if reservation_count["active_reservations"] >= 2:
-					connection.rollback()
-					return {
-						"success": False,
-						"error": "User already has the maximum of two active reservations.",
-					}
-
-				cursor.execute("""
-					SELECT spot_id, user_id
-					FROM parking_transactions AS reservation
-					LEFT JOIN LATERAL (
-						SELECT lifecycle.created_at
-						FROM parking_transactions AS lifecycle
-						WHERE lifecycle.ref_transaction_id = reservation.id
-						  AND lifecycle.action IN ('RELEASE', 'BUMP')
-						ORDER BY lifecycle.id
-						LIMIT 1
-					) AS termination ON TRUE
-					WHERE action = 'RESERVE'
-					  AND start_time::timestamp < %s::timestamp
-					  AND COALESCE(
-						  LEAST(termination.created_at, reservation.end_time::timestamp),
-						  reservation.end_time::timestamp
-					  ) > %s::timestamp
-					  AND COALESCE(
-						  LEAST(termination.created_at, reservation.end_time::timestamp),
-						  reservation.end_time::timestamp
-					  ) > reservation.start_time::timestamp;
-				""", (end_value, start_value))
-				occupied_spots = {row["spot_id"] for row in cursor.fetchall()}
-
-				ordered_spots = list(PARKING_SPOT_IDS)
-				if preferred_spot_id:
-					ordered_spots.remove(preferred_spot_id)
-					ordered_spots.insert(0, preferred_spot_id)
-				assigned_spot = next(
-					(candidate for candidate in ordered_spots if candidate not in occupied_spots),
-					None,
-				)
-				if assigned_spot is None:
-					connection.rollback()
-					return {"success": False, "error": "No spots are available for this time window."}
-
-				cursor.execute("""
 					INSERT INTO parking_transactions
 						(action, user_id, vehicle_type, preferred_spot_id,
 						 start_time, end_time, purpose, spot_id, priority)
-					VALUES ('RESERVE', %s, %s, %s, %s, %s, %s, %s, %s)
+					VALUES ('RESERVE', %s, %s, %s, %s, %s, %s, NULL, %s)
 					RETURNING id;
 				""", (
 					user_id,
@@ -339,7 +341,6 @@ def insert_transaction(
 					start_value,
 					end_value,
 					purpose,
-					assigned_spot,
 					priority,
 				))
 				inserted = cursor.fetchone()
@@ -356,29 +357,7 @@ def insert_transaction(
 					"reservation_starttime": start_value.split(" ", 1)[1],
 					"hours": duration_hours,
 					"purpose": purpose,
-					"spot_allocation": assigned_spot,
 				}
-
-			if ref_transaction_id is None:
-				cursor.execute("""
-					SELECT reservation.id
-					FROM parking_transactions AS reservation
-					WHERE reservation.action = 'RESERVE'
-					  AND reservation.user_id = %s
-					  AND reservation.start_time::timestamp > CURRENT_TIMESTAMP
-					  AND NOT EXISTS (
-						  SELECT 1 FROM parking_transactions AS event
-						  WHERE event.ref_transaction_id = reservation.id
-							AND event.action IN ('CONFIRM', 'RELEASE', 'BUMP')
-					  )
-					ORDER BY reservation.start_time::timestamp
-					LIMIT 1;
-				""", (user_id,))
-				next_reservation = cursor.fetchone()
-				if next_reservation is None:
-					connection.rollback()
-					return {"success": False, "error": "No upcoming reservation is available to confirm."}
-				ref_transaction_id = next_reservation["id"]
 
 			cursor.execute("""
 				SELECT * FROM parking_transactions
@@ -410,6 +389,25 @@ def insert_transaction(
 					"success": False,
 					"error": f"Reservation is no longer actionable ({previous_action['action']}).",
 				}
+
+			if action == "CONFIRM":
+				reservation_start = reservation["start_time"]
+				reservation_end = reservation["end_time"]
+				states = _get_reservations_for_window(
+					cursor,
+					reservation_start,
+					reservation_end,
+				)
+				reservation_state = next(
+					(state for state in states if state["id"] == ref_transaction_id),
+					None,
+				)
+				if not reservation_state or reservation_state["status"] != "ALLOCATED":
+					connection.rollback()
+					return {
+						"success": False,
+						"error": "Only allocated reservations can be confirmed upon arrival.",
+					}
 
 			event_purpose = reason if action == "RELEASE" and reason else reservation["purpose"]
 			cursor.execute("""

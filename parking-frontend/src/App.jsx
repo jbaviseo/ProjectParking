@@ -26,10 +26,6 @@ import {
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api";
 
-function atTime(date, time = "13:00") {
-  return parseISO(`${format(date, "yyyy-MM-dd")}T${time}`);
-}
-
 function parseServerDate(value, time) {
   if (!value) return null;
   if (value instanceof Date) return value;
@@ -62,7 +58,7 @@ function normalizeReservations(payload) {
       const end = parseServerDate(row.effective_end_time ?? row.end_time, row.endtime);
       const duration = Number(row.hours) || (end ? Math.max(1, (end - start) / 3600000) : 1);
       const email = row.user_id ?? row.user ?? "Reservation owner";
-      const status = String(row.status ?? "").toLowerCase();
+      const status = String(row.status ?? "WAITLISTED").toUpperCase();
       return {
         id: row.id ?? row.transaction_id ?? row.reservation_id ?? `live-${index}`,
         date: start,
@@ -71,10 +67,11 @@ function normalizeReservations(payload) {
         hours: duration,
         user: row.user_name ?? row.name ?? email,
         userId: email,
-        spot: row.spot_id ?? row.spot_allocation ?? row.assigned_spot ?? "Unassigned",
+        createdAt: parseServerDate(row.created_at),
+        spot: row.spot_id ?? row.spot_allocation ?? row.assigned_spot ?? "—",
         vehicle: row.vehicle_type ?? row.vehicle ?? "Vehicle",
         purpose: row.purpose ?? "Reservation",
-        confirmed: Boolean(row.confirmed ?? row.is_confirmed) || status === "confirmed",
+        status,
       };
     })
     .filter(Boolean);
@@ -105,9 +102,24 @@ function App() {
   const visibleReservations = useMemo(
     () => reservations
       .filter((reservation) => reservation.date >= weekStart && reservation.date < addDays(weekEnd, 1))
-      .sort((a, b) => a.date - b.date || a.start - b.start),
+      .sort((a, b) => {
+        const dateDifference = a.date - b.date;
+        if (dateDifference !== 0) return dateDifference;
+        const aCreated = a.createdAt?.getTime() ?? Number(a.id);
+        const bCreated = b.createdAt?.getTime() ?? Number(b.id);
+        return aCreated - bCreated;
+      }),
     [reservations, weekStart, weekEnd],
   );
+  const reservationsByDate = useMemo(() => {
+    const groups = new Map();
+    for (const reservation of visibleReservations) {
+      const dateKey = format(reservation.date, "yyyy-MM-dd");
+      if (!groups.has(dateKey)) groups.set(dateKey, []);
+      groups.get(dateKey).push(reservation);
+    }
+    return [...groups.entries()];
+  }, [visibleReservations]);
   const weekLabel = new Intl.DateTimeFormat("en", { month: "short", day: "numeric" }).formatRange(weekStart, weekEnd);
 
   async function loadReservations() {
@@ -176,21 +188,7 @@ function App() {
         throw new Error("The API response did not include a reservation confirmation.");
       }
 
-      const start = atTime(parseISO(form.reservation_date), form.reservation_starttime);
-      const added = {
-        id: result.transaction_id ?? result.reservation_id ?? `local-${Date.now()}`,
-        date: start,
-        start,
-        end: addHours(start, Number(form.hours)),
-        hours: Number(form.hours),
-        user: form.user_id,
-        userId: form.user_id,
-        spot: result.spot_allocation ?? result.assigned_spot ?? result.spot_id ?? "Assigned",
-        vehicle: form.vehicle_type,
-        purpose: form.purpose || "Reservation",
-        confirmed: false,
-      };
-      setReservations((current) => [...current, added]);
+      await loadReservations();
       setSubmitSuccess(`Reservation ${result.reservation_id ?? result.transaction_id ?? "created"} was added.`);
       setForm((current) => ({ ...current, purpose: "" }));
     } catch (error) {
@@ -220,15 +218,13 @@ function App() {
         throw new Error(result?.error ?? `The API did not confirm the ${action} action.`);
       }
 
-      if (action === "confirm") {
-        setReservations((current) => current.map((item) =>
-          item.id === reservation.id ? { ...item, confirmed: true } : item,
-        ));
-        setActionNotice({ kind: "success", text: `${reservation.user}'s reservation is confirmed.` });
-      } else {
-        setReservations((current) => current.filter((item) => item.id !== reservation.id));
-        setActionNotice({ kind: "success", text: `${reservation.user}'s reservation was released.` });
-      }
+      await loadReservations();
+      setActionNotice({
+        kind: "success",
+        text: action === "confirm"
+          ? `${reservation.user}'s arrival was recorded.`
+          : `${reservation.user}'s reservation was released.`,
+      });
     } catch (error) {
       setActionNotice({ kind: "error", text: error.message });
     } finally {
@@ -269,30 +265,42 @@ function App() {
             <div className="table-scroll">
               <table className="reservation-table">
                 <thead>
-                  <tr><th scope="col">Date</th><th scope="col">Time</th><th scope="col">Reserved for</th><th scope="col">Space</th><th scope="col">Vehicle</th><th scope="col">Status</th></tr>
+                  <tr><th scope="col">Time</th><th scope="col">Reserved for</th><th scope="col">Space</th><th scope="col">Vehicle</th><th scope="col">Created</th><th scope="col">Status</th></tr>
                 </thead>
-                <tbody>
-                  {isLoading ? (
+                {isLoading ? (
+                  <tbody>
                     <tr><td className="table-message" colSpan="6"><LoaderCircle size={16} className="spin" />Loading reservations…</td></tr>
-                  ) : visibleReservations.length === 0 ? (
+                  </tbody>
+                ) : reservationsByDate.length === 0 ? (
+                  <tbody>
                     <tr><td className="table-message" colSpan="6">No reservations this week.</td></tr>
-                  ) : visibleReservations.map((reservation) => (
-                    <tr key={reservation.id} className={`reservation-row ${reservation.confirmed ? "reservation-confirmed" : "reservation-pending"}`}>
-                      <td className="reservation-date">{format(reservation.date, "EEE, MMM d")}</td>
-                      <td>{format(reservation.start, "h:mm a")} – {format(reservation.end, "h:mm a")}</td>
-                      <td title={reservation.user}>{reservation.user}</td>
-                      <td>{reservation.spot}</td>
-                      <td>{reservation.vehicle}</td>
-                      <td>
-                        <div className="status-actions">
-                          <span className={`status-badge ${reservation.confirmed ? "status-confirmed" : "status-pending"}`}>{reservation.confirmed ? "Confirmed" : "Pending"}</span>
-                          {reservation.confirmed ? null : <button type="button" className="table-action" onClick={() => runLifecycleAction("confirm", reservation)} disabled={pendingAction !== null} aria-label={`Confirm reservation for ${reservation.user}`} title="Confirm reservation">{pendingAction === `${reservation.id}:confirm` ? <LoaderCircle size={13} className="spin" /> : <CircleCheck size={13} />}<span>Confirm</span></button>}
-                          <button type="button" className="table-action table-action-release" onClick={() => runLifecycleAction("release", reservation)} disabled={pendingAction !== null} aria-label={`Release reservation for ${reservation.user}`} title="Release reservation">{pendingAction === `${reservation.id}:release` ? <LoaderCircle size={13} className="spin" /> : <LogOut size={13} />}<span>Release</span></button>
-                        </div>
-                      </td>
+                  </tbody>
+                ) : reservationsByDate.map(([dateKey, dayReservations]) => (
+                  <tbody className="reservation-date-group" key={dateKey}>
+                    <tr className="date-group-heading">
+                      <th scope="rowgroup" colSpan="6">
+                        <span>{format(dayReservations[0].date, "EEEE, MMMM d, yyyy")}</span>
+                        <span className="date-group-count">{dayReservations.length} {dayReservations.length === 1 ? "reservation" : "reservations"}</span>
+                      </th>
                     </tr>
-                  ))}
-                </tbody>
+                    {dayReservations.map((reservation) => (
+                      <tr key={reservation.id} className={`reservation-row reservation-${reservation.status.toLowerCase()}`}>
+                        <td>{format(reservation.start, "h:mm a")} – {format(reservation.end, "h:mm a")}</td>
+                        <td title={reservation.user}>{reservation.user}</td>
+                        <td>{reservation.spot}</td>
+                        <td>{reservation.vehicle}</td>
+                        <td>{reservation.createdAt ? format(reservation.createdAt, "MMM d, h:mm a") : "—"}</td>
+                        <td>
+                          <div className="status-actions">
+                            <span className={`status-badge status-${reservation.status.toLowerCase()}`}>{reservation.status}</span>
+                            {reservation.status === "ALLOCATED" && <button type="button" className="table-action" onClick={() => runLifecycleAction("confirm", reservation)} disabled={pendingAction !== null} aria-label={`Record arrival for ${reservation.user}`} title="Record driver arrival">{pendingAction === `${reservation.id}:confirm` ? <LoaderCircle size={13} className="spin" /> : <CircleCheck size={13} />}<span>Record arrival</span></button>}
+                            {reservation.status !== "RELEASED" && <button type="button" className="table-action table-action-release" onClick={() => runLifecycleAction("release", reservation)} disabled={pendingAction !== null} aria-label={`Release reservation for ${reservation.user}`} title="Release reservation">{pendingAction === `${reservation.id}:release` ? <LoaderCircle size={13} className="spin" /> : <LogOut size={13} />}<span>Release</span></button>}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                ))}
               </table>
             </div>
           </div>
