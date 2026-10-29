@@ -3,22 +3,18 @@ import {
   addDays,
   addHours,
   format,
-  isSameDay,
-  isToday,
   parseISO,
   startOfWeek,
 } from "date-fns";
 import {
   ArrowLeft,
   ArrowRight,
-  CalendarDays,
   CarFront,
   Check,
   ChevronDown,
   CircleAlert,
   CircleCheck,
   Clock3,
-  Leaf,
   LoaderCircle,
   LogOut,
   MapPin,
@@ -66,6 +62,7 @@ function normalizeReservations(payload) {
       const end = parseServerDate(row.effective_end_time ?? row.end_time, row.endtime);
       const duration = Number(row.hours) || (end ? Math.max(1, (end - start) / 3600000) : 1);
       const email = row.user_id ?? row.user ?? "Reservation owner";
+      const status = String(row.status ?? "").toLowerCase();
       return {
         id: row.id ?? row.transaction_id ?? row.reservation_id ?? `live-${index}`,
         date: start,
@@ -77,20 +74,10 @@ function normalizeReservations(payload) {
         spot: row.spot_id ?? row.spot_allocation ?? row.assigned_spot ?? "Unassigned",
         vehicle: row.vehicle_type ?? row.vehicle ?? "Vehicle",
         purpose: row.purpose ?? "Reservation",
-        confirmed: Boolean(row.confirmed ?? row.is_confirmed),
-        color: ["mint", "coral", "blue", "yellow"][index % 4],
+        confirmed: Boolean(row.confirmed ?? row.is_confirmed) || status === "confirmed",
       };
     })
     .filter(Boolean);
-}
-
-function initials(name) {
-  return name
-    .split(/[\s@._-]+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0].toUpperCase())
-    .join("");
 }
 
 function App() {
@@ -114,14 +101,13 @@ function App() {
     purpose: "",
   });
 
-  const days = useMemo(() => Array.from({ length: 7 }, (_, index) => addDays(weekStart, index)), [weekStart]);
+  const weekEnd = addDays(weekStart, 6);
   const visibleReservations = useMemo(
-    () => reservations.filter((reservation) => days.some((day) => isSameDay(day, reservation.date))),
-    [reservations, days],
+    () => reservations
+      .filter((reservation) => reservation.date >= weekStart && reservation.date < addDays(weekEnd, 1))
+      .sort((a, b) => a.date - b.date || a.start - b.start),
+    [reservations, weekStart, weekEnd],
   );
-  const weekEnd = days[6];
-  const totalCount = visibleReservations.length;
-  const spotsInUse = new Set(visibleReservations.map((reservation) => reservation.spot)).size;
   const weekLabel = new Intl.DateTimeFormat("en", { month: "short", day: "numeric" }).formatRange(weekStart, weekEnd);
 
   async function loadReservations() {
@@ -202,7 +188,7 @@ function App() {
         spot: result.spot_allocation ?? result.assigned_spot ?? result.spot_id ?? "Assigned",
         vehicle: form.vehicle_type,
         purpose: form.purpose || "Reservation",
-        color: "mint",
+        confirmed: false,
       };
       setReservations((current) => [...current, added]);
       setSubmitSuccess(`Reservation ${result.reservation_id ?? result.transaction_id ?? "created"} was added.`);
@@ -258,113 +244,57 @@ function App() {
 
   return (
     <div className="app-shell">
-      <header className="topbar">
-        <a className="brand" href="#top" aria-label="Parkside home">
-          <span className="brand-mark"><Leaf size={17} strokeWidth={2.2} /></span>
-          <span>parkside<span className="brand-dot">.</span></span>
-        </a>
-        <div className="topbar-right">
-          <span className="topbar-label">PARKING OPERATIONS</span>
-          <span className="topbar-divider" />
-          <button className="profile-button" type="button" title="Signed in as operations" aria-label="Operations profile">
-            <span>OP</span>
-          </button>
-        </div>
-      </header>
-
-      <main id="top" className="page-content">
-        <section className="page-heading">
+      <main className="page-content">
+        <header className="page-header">
           <div>
-            <p className="eyebrow"><span className="eyebrow-mark" /> WORKSPACE / RESERVATIONS</p>
-            <h1>Reservation calendar</h1>
-            <p className="heading-subtitle">A clear view of who is parking, where, and when.</p>
+            <h1>Reservations</h1>
+            <p>{weekLabel}{format(weekEnd, " yyyy")}</p>
           </div>
-          <div className="heading-date"><CalendarDays size={16} /><span>{format(new Date(), "EEEE, MMMM d")}</span></div>
-        </section>
-
-        <section className="summary-strip" aria-label="Weekly reservation summary">
-          <div className="summary-item summary-total">
-            <span className="summary-label">THIS WEEK</span>
-            <strong>{isLoading ? "—" : String(totalCount).padStart(2, "0")}</strong>
-            <span className="summary-caption">reservations</span>
+          <div className="toolbar-actions">
+            <div className="week-controls" aria-label="Change week">
+              <button type="button" className="icon-button" onClick={() => setWeekStart((date) => addDays(date, -7))} title="Previous week" aria-label="Previous week"><ArrowLeft size={17} /></button>
+              <button type="button" className="today-button" onClick={() => setWeekStart(startOfWeek(new Date(), { weekStartsOn: 1 }))}>Today</button>
+              <button type="button" className="icon-button" onClick={() => setWeekStart((date) => addDays(date, 7))} title="Next week" aria-label="Next week"><ArrowRight size={17} /></button>
+            </div>
+            <button type="button" className="refresh-button" onClick={loadReservations} disabled={isLoading} title="Refresh reservations" aria-label="Refresh reservations"><RefreshCw size={15} className={isLoading ? "spin" : ""} /></button>
+            <button type="button" className="primary-button" onClick={openForm}><Plus size={17} /><span>New reservation</span></button>
           </div>
-          <div className="summary-item">
-            <span className="summary-label">SPOTS IN USE</span>
-            <strong>{isLoading ? "—" : String(spotsInUse).padStart(2, "0")}</strong>
-            <span className="summary-caption">unique spaces</span>
-          </div>
-          <div className="summary-note">
-            <span className="summary-note-icon"><MapPin size={16} /></span>
-            <div><strong>Parking, in sync.</strong><span>Bookings are grouped by day and space.</span></div>
-          </div>
-        </section>
+        </header>
 
         <section className={`workspace ${formOpen ? "workspace-form-open" : ""}`}>
           <div className="calendar-panel">
-            <div className="calendar-toolbar">
-              <div className="week-title-wrap">
-                <span className="section-kicker">WEEKLY VIEW</span>
-                <h2>{weekLabel}<span className="week-year">{format(weekEnd, " yyyy")}</span></h2>
-              </div>
-              <div className="toolbar-actions">
-                <div className="week-controls" aria-label="Change week">
-                  <button type="button" className="icon-button" onClick={() => setWeekStart((date) => addDays(date, -7))} title="Previous week" aria-label="Previous week"><ArrowLeft size={17} /></button>
-                  <button type="button" className="today-button" onClick={() => setWeekStart(startOfWeek(new Date(), { weekStartsOn: 1 }))}>Today</button>
-                  <button type="button" className="icon-button" onClick={() => setWeekStart((date) => addDays(date, 7))} title="Next week" aria-label="Next week"><ArrowRight size={17} /></button>
-                </div>
-                <button type="button" className="refresh-button" onClick={loadReservations} disabled={isLoading} title="Refresh reservations" aria-label="Refresh reservations"><RefreshCw size={15} className={isLoading ? "spin" : ""} /></button>
-                <button type="button" className="primary-button" onClick={openForm}><Plus size={17} /><span>New reservation</span></button>
-              </div>
-            </div>
-
             {apiNote && <div className="api-notice" role="alert"><CircleAlert size={15} /><span><strong>Could not load reservations.</strong> {apiNote}</span><button type="button" onClick={loadReservations}>Retry</button></div>}
             {actionNotice && <div className={`action-notice action-notice-${actionNotice.kind}`} role={actionNotice.kind === "error" ? "alert" : "status"}>{actionNotice.text}</div>}
 
-            <div className="calendar-scroll">
-              <div className="week-grid">
-                {days.map((day) => {
-                  const dayReservations = visibleReservations
-                    .filter((reservation) => isSameDay(day, reservation.date))
-                    .sort((a, b) => a.start - b.start);
-                  return (
-                    <section key={day.toISOString()} className={`day-column ${isToday(day) ? "day-today" : ""}`} aria-label={format(day, "EEEE, MMMM d")}>
-                      <div className="day-header">
-                        <span className="day-name">{format(day, "EEE").toUpperCase()}</span>
-                        <span className={`day-number ${isToday(day) ? "day-number-today" : ""}`}>{format(day, "d")}</span>
-                        <span className="day-count">{String(dayReservations.length).padStart(2, "0")} BOOKINGS</span>
-                      </div>
-                      <div className="day-bookings">
-                        {isLoading ? (
-                          <div className="loading-column"><LoaderCircle size={18} /><span>Loading</span></div>
-                        ) : dayReservations.length ? dayReservations.map((reservation) => (
-                          <article className={`booking-card booking-${reservation.color}`} key={reservation.id}>
-                            <div className="booking-time"><Clock3 size={12} /><span>{format(reservation.start, "h:mm a")}</span><span className="time-dash">–</span><span>{format(reservation.end, "h:mm a")}</span></div>
-                            <div className="booking-person">
-                              <span className={`person-avatar avatar-${reservation.color}`}>{initials(reservation.user)}</span>
-                              <span className="person-name" title={reservation.user}>{reservation.user}</span>
-                            </div>
-                            <div className="booking-meta"><span className="spot-label"><MapPin size={12} />{reservation.spot}</span><span className="vehicle-label"><CarFront size={13} />{reservation.vehicle}</span></div>
-                            <div className="booking-purpose">{reservation.purpose}</div>
-                            <div className="booking-actions">
-                              {reservation.confirmed ? <span className="confirmed-state"><CircleCheck size={12} />Confirmed</span> : <button type="button" className="booking-action-confirm" onClick={() => runLifecycleAction("confirm", reservation)} disabled={pendingAction !== null} aria-label={`Confirm reservation for ${reservation.user}`} title="Confirm reservation">{pendingAction === `${reservation.id}:confirm` ? <LoaderCircle size={12} className="spin" /> : <CircleCheck size={12} />}<span>Confirm</span></button>}
-                              <button type="button" className="booking-action-release" onClick={() => runLifecycleAction("release", reservation)} disabled={pendingAction !== null} aria-label={`Release reservation for ${reservation.user}`} title="Release reservation">{pendingAction === `${reservation.id}:release` ? <LoaderCircle size={12} className="spin" /> : <LogOut size={12} />}<span>Release</span></button>
-                            </div>
-                          </article>
-                        )) : (
-                          <div className="empty-day"><span className="empty-day-line" /><span>Open day</span><button type="button" onClick={() => { setForm((current) => ({ ...current, reservation_date: format(day, "yyyy-MM-dd") })); openForm(); }} aria-label={`Create reservation for ${format(day, "EEEE, MMMM d")}`}><Plus size={15} /></button></div>
-                        )}
-                      </div>
-                      <button type="button" className="day-add" onClick={() => { setForm((current) => ({ ...current, reservation_date: format(day, "yyyy-MM-dd") })); openForm(); }}><Plus size={13} /><span>Add booking</span></button>
-                    </section>
-                  );
-                })}
-              </div>
+            <div className="table-scroll">
+              <table className="reservation-table">
+                <thead>
+                  <tr><th scope="col">Date</th><th scope="col">Time</th><th scope="col">Reserved for</th><th scope="col">Space</th><th scope="col">Vehicle</th><th scope="col">Status</th></tr>
+                </thead>
+                <tbody>
+                  {isLoading ? (
+                    <tr><td className="table-message" colSpan="6"><LoaderCircle size={16} className="spin" />Loading reservations…</td></tr>
+                  ) : visibleReservations.length === 0 ? (
+                    <tr><td className="table-message" colSpan="6">No reservations this week.</td></tr>
+                  ) : visibleReservations.map((reservation) => (
+                    <tr key={reservation.id} className={`reservation-row ${reservation.confirmed ? "reservation-confirmed" : "reservation-pending"}`}>
+                      <td className="reservation-date">{format(reservation.date, "EEE, MMM d")}</td>
+                      <td>{format(reservation.start, "h:mm a")} – {format(reservation.end, "h:mm a")}</td>
+                      <td title={reservation.user}>{reservation.user}</td>
+                      <td>{reservation.spot}</td>
+                      <td>{reservation.vehicle}</td>
+                      <td>
+                        <div className="status-actions">
+                          <span className={`status-badge ${reservation.confirmed ? "status-confirmed" : "status-pending"}`}>{reservation.confirmed ? "Confirmed" : "Pending"}</span>
+                          {reservation.confirmed ? null : <button type="button" className="table-action" onClick={() => runLifecycleAction("confirm", reservation)} disabled={pendingAction !== null} aria-label={`Confirm reservation for ${reservation.user}`} title="Confirm reservation">{pendingAction === `${reservation.id}:confirm` ? <LoaderCircle size={13} className="spin" /> : <CircleCheck size={13} />}<span>Confirm</span></button>}
+                          <button type="button" className="table-action table-action-release" onClick={() => runLifecycleAction("release", reservation)} disabled={pendingAction !== null} aria-label={`Release reservation for ${reservation.user}`} title="Release reservation">{pendingAction === `${reservation.id}:release` ? <LoaderCircle size={13} className="spin" /> : <LogOut size={13} />}<span>Release</span></button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-
-            <footer className="calendar-footer">
-              <div className="legend"><span className="legend-label">RESERVATION TYPES</span><span><i className="legend-dot legend-mint" />Staff</span><span><i className="legend-dot legend-coral" />Visitor</span><span><i className="legend-dot legend-blue" />Operations</span></div>
-              <span className="timezone-label">LOCAL TIME · HKT</span>
-            </footer>
           </div>
 
           {formOpen && (

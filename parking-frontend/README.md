@@ -23,3 +23,13 @@ FastAPI loads the repository-root `.env`. Set `DATABASE_URL`, or provide `POSTGR
 The calendar reads real reservations from `/reservations`; it does not display placeholder bookings. The side form posts to `/reserve`, and reservation cards can call `/confirm` and `/release`.
 
 RESERVE submissions include `user_id`, `vehicle_type`, `reservation_date`, `reservation_starttime`, `hours`, `preferred_spot_id`, and `purpose`.
+
+## Run with Docker Compose
+
+From the repository root, start the frontend and its backend dependencies:
+
+```powershell
+docker compose up --build parking-frontend
+```
+
+Open <http://localhost:3000>. The frontend container serves the built app and proxies `/api/*` requests to the `fastapi-app` Compose service.

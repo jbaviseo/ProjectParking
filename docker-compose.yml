@@ -32,8 +32,19 @@ services:
     depends_on:
       - postgres
 
+  parking-frontend:
+    build: ./parking-frontend
+    container_name: parking_frontend
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+    depends_on:
+      - fastapi-app
+
   postgres:
     image: postgres:16-alpine
+    ports:
+      - "5432:5432"
     container_name: parking_db
     restart: unless-stopped
     environment:
@@ -72,4 +83,3 @@ services:
 volumes:
   n8n_data:
   db_data:
-
