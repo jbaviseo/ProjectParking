@@ -3,7 +3,7 @@ services:
     image: docker.n8n.io/n8nio/n8n
     container_name: n8n_home
     ports:
-      - "5678:5678"
+      - "4567:5678"
     environment:
       GENERIC_TIMEZONE: "Asia/Hong_Kong"
       TZ: "Asia/Hong_Kong"
@@ -28,15 +28,18 @@ services:
     restart: unless-stopped
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/parking_db
+      - PARKING_NOTIFICATION_WEBHOOK_URL=${PARKING_NOTIFICATION_WEBHOOK_URL:-}
       # - N8N_WEBHOOK_URL=http://n8n-service:5678/webhook
+    volumes:
+      - ./fastapi-backend/parking-config.json:/app/parking-config.json:ro
     depends_on:
       - postgres
 
-  parking-frontend:
+  parking:
     build: ./parking-frontend
-    container_name: parking_frontend
+    container_name: parking
     ports:
-      - "3000:80"
+      - "5678:80"
     restart: unless-stopped
     depends_on:
       - fastapi-app

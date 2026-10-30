@@ -70,6 +70,11 @@ app = FastAPI(
 def root():
     return { "Hello": "World" }
 
+@app.get("/config")
+def get_parking_config():
+    """Return frontend-safe parking configuration."""
+    return {"parking_spot_ids": database.PARKING_SPOT_IDS}
+
 @app.get("/state")
 def get_parking_state(date: str):
     '''Gets state of the parking at a specific time stamp.'''

@@ -42,8 +42,11 @@ h1 { margin: 0 0 5px; font-size: 24px; font-weight: 600; }
 .reservation-table tbody tr:last-child td { border-bottom: 0; }
 .reservation-table tbody + tbody .date-group-heading th { border-top: 10px solid #f5f6f5; }
 .date-group-heading th { padding: 12px 14px; border-bottom: 1px solid #e4e9e4; background: #f1f4f1; color: #35473a; font-size: 13px; }
-.date-group-heading th > span:first-child { font-size: 13px; font-weight: 700; }
+.date-group-toggle { width: 100%; display: flex; align-items: center; gap: 9px; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.date-group-toggle > span:first-child { font-size: 13px; font-weight: 700; }
 .date-group-count { margin-left: 9px; color: #758078; font-size: 11px; font-weight: 400; }
+.date-group-chevron { margin-left: auto; transition: transform 120ms ease; }
+.date-group-chevron-collapsed { transform: rotate(-90deg); }
 .reservation-row { transition: background-color 120ms ease; }
 .reservation-row:hover { filter: brightness(.985); }
 .reservation-allocated { background: #eaf6ec; }

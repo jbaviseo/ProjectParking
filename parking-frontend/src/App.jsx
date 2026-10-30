@@ -80,20 +80,23 @@ function normalizeReservations(payload) {
 function App() {
   const [weekStart, setWeekStart] = useState(() => startOfWeek(new Date(), { weekStartsOn: 1 }));
   const [reservations, setReservations] = useState([]);
+  const [parkingSpotIds, setParkingSpotIds] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [apiNote, setApiNote] = useState("");
+  const [configNote, setConfigNote] = useState("");
   const [formOpen, setFormOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState("");
   const [submitSuccess, setSubmitSuccess] = useState("");
   const [pendingAction, setPendingAction] = useState(null);
   const [actionNotice, setActionNotice] = useState(null);
+  const [collapsedDates, setCollapsedDates] = useState(() => new Set());
   const [form, setForm] = useState({
     user_id: "",
     vehicle_type: "Car",
     reservation_date: format(new Date(), "yyyy-MM-dd"),
     reservation_starttime: "13:00",
-    hours: "2",
+    hours: "9",
     preferred_spot_id: "",
     purpose: "",
   });
@@ -118,7 +121,7 @@ function App() {
       if (!groups.has(dateKey)) groups.set(dateKey, []);
       groups.get(dateKey).push(reservation);
     }
-    return [...groups.entries()];
+    return [...groups.entries()].sort(([dateA], [dateB]) => dateB.localeCompare(dateA));
   }, [visibleReservations]);
   const weekLabel = new Intl.DateTimeFormat("en", { month: "short", day: "numeric" }).formatRange(weekStart, weekEnd);
 
@@ -154,6 +157,26 @@ function App() {
   useEffect(() => {
     loadReservations();
   }, [weekStart]);
+
+  async function loadConfig() {
+    setConfigNote("");
+    try {
+      const response = await fetch(`${API_BASE}/config`, { headers: { Accept: "application/json" } });
+      if (!response.ok) throw new Error(`Parking config returned ${response.status}`);
+      const data = await response.json();
+      if (!Array.isArray(data?.parking_spot_ids)) {
+        throw new Error("The parking config endpoint did not return a parking spot list.");
+      }
+      setParkingSpotIds(data.parking_spot_ids);
+    } catch (error) {
+      setParkingSpotIds([]);
+      setConfigNote(error.message);
+    }
+  }
+
+  useEffect(() => {
+    loadConfig();
+  }, []);
 
   function updateForm(event) {
     const { name, value } = event.target;
@@ -238,6 +261,15 @@ function App() {
     setFormOpen(true);
   }
 
+  function toggleDate(dateKey) {
+    setCollapsedDates((current) => {
+      const next = new Set(current);
+      if (next.has(dateKey)) next.delete(dateKey);
+      else next.add(dateKey);
+      return next;
+    });
+  }
+
   return (
     <div className="app-shell">
       <main className="page-content">
@@ -260,6 +292,7 @@ function App() {
         <section className={`workspace ${formOpen ? "workspace-form-open" : ""}`}>
           <div className="calendar-panel">
             {apiNote && <div className="api-notice" role="alert"><CircleAlert size={15} /><span><strong>Could not load reservations.</strong> {apiNote}</span><button type="button" onClick={loadReservations}>Retry</button></div>}
+            {configNote && <div className="api-notice" role="alert"><CircleAlert size={15} /><span><strong>Could not load parking settings.</strong> {configNote}</span><button type="button" onClick={loadConfig}>Retry</button></div>}
             {actionNotice && <div className={`action-notice action-notice-${actionNotice.kind}`} role={actionNotice.kind === "error" ? "alert" : "status"}>{actionNotice.text}</div>}
 
             <div className="table-scroll">
@@ -276,14 +309,23 @@ function App() {
                     <tr><td className="table-message" colSpan="6">No reservations this week.</td></tr>
                   </tbody>
                 ) : reservationsByDate.map(([dateKey, dayReservations]) => (
-                  <tbody className="reservation-date-group" key={dateKey}>
+                  <tbody className="reservation-date-group" key={dateKey} id={`reservations-${dateKey}`}>
                     <tr className="date-group-heading">
                       <th scope="rowgroup" colSpan="6">
-                        <span>{format(dayReservations[0].date, "EEEE, MMMM d, yyyy")}</span>
-                        <span className="date-group-count">{dayReservations.length} {dayReservations.length === 1 ? "reservation" : "reservations"}</span>
+                        <button
+                          type="button"
+                          className="date-group-toggle"
+                          aria-expanded={!collapsedDates.has(dateKey)}
+                          aria-controls={`reservations-${dateKey}`}
+                          onClick={() => toggleDate(dateKey)}
+                        >
+                          <span>{format(dayReservations[0].date, "EEEE, MMMM d, yyyy")}</span>
+                          <span className="date-group-count">{dayReservations.length} {dayReservations.length === 1 ? "reservation" : "reservations"}</span>
+                          <ChevronDown size={16} className={collapsedDates.has(dateKey) ? "date-group-chevron date-group-chevron-collapsed" : "date-group-chevron"} />
+                        </button>
                       </th>
                     </tr>
-                    {dayReservations.map((reservation) => (
+                    {!collapsedDates.has(dateKey) && dayReservations.map((reservation) => (
                       <tr key={reservation.id} className={`reservation-row reservation-${reservation.status.toLowerCase()}`}>
                         <td>{format(reservation.start, "h:mm a")} – {format(reservation.end, "h:mm a")}</td>
                         <td title={reservation.user}>{reservation.user}</td>
@@ -314,7 +356,7 @@ function App() {
               <p className="drawer-intro">Add a vehicle to the weekly parking schedule.</p>
               <form className="reservation-form" onSubmit={submitReservation}>
                 <label className="field-label" htmlFor="user_id">Reserved for <span>REQUIRED</span></label>
-                <div className="input-wrap"><UserRound size={16} /><input id="user_id" name="user_id" type="email" placeholder="name@company.com" value={form.user_id} onChange={updateForm} required /></div>
+                <div className="input-wrap"><UserRound size={16} /><input id="user_id" name="user_id" type="email" placeholder="email@viseo.com" value={form.user_id} onChange={updateForm} required /></div>
 
                 <label className="field-label" htmlFor="vehicle_type">Vehicle type <span>REQUIRED</span></label>
                 <div className="select-wrap"><CarFront size={16} /><select id="vehicle_type" name="vehicle_type" value={form.vehicle_type} onChange={updateForm} required><option>Car</option><option>Motorcycle</option></select><ChevronDown size={15} /></div>
@@ -328,7 +370,7 @@ function App() {
                 <div className="select-wrap"><Clock3 size={16} /><select id="hours" name="hours" value={form.hours} onChange={updateForm}>{Array.from({ length: 12 }, (_, index) => index + 1).map((hour) => <option value={hour} key={hour}>{hour} {hour === 1 ? "hour" : "hours"}</option>)}</select><ChevronDown size={15} /></div>
 
                 <label className="field-label" htmlFor="preferred_spot_id">Preferred space <span>OPTIONAL</span></label>
-                <div className="select-wrap"><MapPin size={16} /><select id="preferred_spot_id" name="preferred_spot_id" value={form.preferred_spot_id} onChange={updateForm}><option value="">Any available space</option>{["A-1", "A-2", "B-1", "B-2", "B-3"].map((spot) => <option value={spot} key={spot}>{spot}</option>)}</select><ChevronDown size={15} /></div>
+                <div className="select-wrap"><MapPin size={16} /><select id="preferred_spot_id" name="preferred_spot_id" value={form.preferred_spot_id} onChange={updateForm}><option value="">Any available space</option>{parkingSpotIds.map((spot) => <option value={spot} key={spot}>{spot}</option>)}</select><ChevronDown size={15} /></div>
 
                 <label className="field-label" htmlFor="purpose">Purpose <span>OPTIONAL</span></label>
                 <textarea id="purpose" name="purpose" placeholder="Meeting, office visit..." rows="3" value={form.purpose} onChange={updateForm} maxLength={240} />
