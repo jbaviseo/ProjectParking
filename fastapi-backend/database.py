@@ -93,7 +93,8 @@ PARKING_SPOT_IDS, DEFAULT_RESERVATION_LIMIT, USER_RESERVATION_LIMITS = _load_par
 
 db_pool: Optional[pool.ThreadedConnectionPool] = None
 
-
+# database connections need to be initilized before any request is processed, this is async so there could be multiple
+# connections at a time so we pool them
 def get_pool() -> pool.ThreadedConnectionPool:
 	global db_pool
 	if db_pool is None:
@@ -165,7 +166,8 @@ def close_pool() -> None:
 		db_pool.closeall()
 		db_pool = None
 
-
+# function to derive current reservation statuses by replaying all the transactions
+# we do not store the current status in the database, we derive it from the ledger of transactions
 def _simulate_reservations(
 	reservations: list[dict[str, Any]],
 	events: list[dict[str, Any]],
@@ -237,7 +239,8 @@ def _simulate_reservations(
 
 	return results
 
-
+# uses the concept of database indexes to find all reservations that overlap with the requested time window, 
+# then replays all the events for those reservations to derive their current statuses
 def _get_reservations_for_window(cursor: Any, start_time: str, end_time: str) -> list[dict[str, Any]]:
 	cursor.execute("""
 		SELECT * FROM parking_transactions
@@ -264,7 +267,8 @@ def _get_reservations_for_window(cursor: Any, start_time: str, end_time: str) ->
 			_notify_allocated_reservation(reservation)
 	return states
 
-
+# ---------------------------------------------------------------------------------------------------
+# for checking reservation limits, i.e. how many upcoming reservations a user can have at the same time
 def _reservation_limit_for_user(user_id: str) -> Optional[int]:
 	return USER_RESERVATION_LIMITS.get(user_id.strip().casefold(), DEFAULT_RESERVATION_LIMIT)
 
@@ -298,8 +302,9 @@ def _check_reservation_limit(
 	if row["reservation_count"] >= limit:
 		return f"Maximum of {limit} upcoming reservations reached for this user."
 	return None
+# -----------------------------------------------------------------------------------------------
 
-
+# sending notifications to Power Automate flow that sends a message to teams when a reservation is allocated
 def _notify_allocated_reservation(reservation: dict[str, Any]) -> None:
 	webhook_url = os.getenv("PARKING_NOTIFICATION_WEBHOOK_URL")
 	if not webhook_url:
@@ -381,6 +386,8 @@ def _notify_allocated_reservation(reservation: dict[str, Any]) -> None:
 		get_pool().putconn(connection)
 
 
+# gets all reservations that overlap with the requested time window, and returns their current statuses
+# used by the function
 def get_reservations(start_time: str, end_time: str) -> list[dict[str, Any]]:
 	"""Return replayed reservation states overlapping the requested time window."""
 	connection = get_pool().getconn()

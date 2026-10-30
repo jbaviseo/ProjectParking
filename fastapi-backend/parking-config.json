@@ -1,7 +1,9 @@
 {
   "parking_spot_ids": ["P1", "P2"],
   "reservation_limits": {
-    "default": null,
-    "users": {}
+    "default": 3,
+    "users": {
+      "joshua.amador1@viseo.com": 2
+    }
   }
 }
